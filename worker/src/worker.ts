@@ -4,6 +4,7 @@ import { jwt } from 'hono/jwt'
 import { Jwt } from 'hono/utils/jwt'
 
 import { api as commonApi } from './commom_api';
+import { api as openAuthApi } from './open_api/auth';
 import { api as mailsApi } from './mails_api'
 import { api as userApi } from './user_api';
 import { api as adminApi } from './admin_api';
@@ -13,7 +14,7 @@ import { api as telegramApi } from './telegram_api'
 import i18n from './i18n';
 import { email } from './email';
 import { scheduled } from './scheduled';
-import { getAdminPasswords, getPasswords, getBooleanValue, getStringArray } from './utils';
+import { getPasswords, getBooleanValue, getDomains, checkIsAdmin } from './utils';
 import { checkAccessControl } from './ip_blacklist';
 
 const API_PATHS = [
@@ -64,6 +65,7 @@ app.use('/*', async (c, next) => {
 		c.req.path.startsWith("/api/new_address")
 		|| c.req.path.startsWith("/api/send_mail")
 		|| c.req.path.startsWith("/external/api/send_mail")
+		|| (c.req.path.startsWith("/user_api/address/") && c.req.path.endsWith("/send_mail"))
 		|| c.req.path.startsWith("/user_api/register")
 		|| c.req.path.startsWith("/user_api/verify_code")
 	) {
@@ -124,7 +126,8 @@ const checkUserPayload = async (
 }
 
 const checkoutUserRolePayload = async (
-	c: Context<HonoCustomType>
+	c: Context<HonoCustomType>,
+	userId?: number
 ): Promise<void> => {
 	try {
 		const token = c.req.raw.headers.get("x-user-access-token");
@@ -137,6 +140,7 @@ const checkoutUserRolePayload = async (
 			return;
 		}
 		if (typeof payload?.user_role !== "string") return;
+		if (userId !== undefined && payload.user_id !== userId) return;
 		c.set("userRolePayload", payload.user_role);
 	} catch (e) {
 		console.error(e);
@@ -201,8 +205,12 @@ app.use('/user_api/*', async (c, next) => {
 		console.error(e);
 		return c.text(msgs.UserTokenExpiredMsg, 401)
 	}
-	if (c.req.path.startsWith("/user_api/bind_address")) {
-		await checkoutUserRolePayload(c);
+	if (
+		c.req.path.startsWith("/user_api/bind_address")
+		|| c.req.path.startsWith("/user_api/address/")
+	) {
+		const { user_id } = c.get("userPayload");
+		await checkoutUserRolePayload(c, user_id);
 	}
 	if (c.req.path.startsWith('/user_api/bind_address')
 		&& c.req.method === 'POST'
@@ -215,13 +223,9 @@ app.use('/user_api/*', async (c, next) => {
 app.use('/admin/*', async (c, next) => {
 
 	// check header x-admin-auth
-	const adminPasswords = getAdminPasswords(c);
-	if (adminPasswords && adminPasswords.length > 0) {
-		const adminAuth = c.req.raw.headers.get("x-admin-auth");
-		if (adminAuth && adminPasswords.includes(adminAuth)) {
-			await next();
-			return;
-		}
+	if (checkIsAdmin(c)) {
+		await next();
+		return;
 	}
 	const lang = c.req.raw.headers.get("x-lang") || c.env.DEFAULT_LANG;
 	const msgs = i18n.getMessages(lang);
@@ -257,6 +261,7 @@ app.use('/admin/*', async (c, next) => {
 
 
 app.route('/', commonApi)
+app.route('/', openAuthApi)
 app.route('/', mailsApi)
 app.route('/', userApi)
 app.route('/', adminApi)
@@ -272,7 +277,7 @@ const health_check = async (c: Context<HonoCustomType>) => {
 	if (!c.env.JWT_SECRET) {
 		return c.text(msgs.JWTSecretNotSetMsg, 400);
 	}
-	if (getStringArray(c.env.DOMAINS).length === 0) {
+	if (getDomains(c).length === 0) {
 		return c.text(msgs.DomainsNotSetMsg, 400);
 	}
 	return c.text("OK");
